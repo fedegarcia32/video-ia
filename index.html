@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Video IA">
+<meta name="theme-color" content="#000">
+<title>Video IA</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:#000;color:#f2f2f7;font:16px -apple-system,system-ui,sans-serif;padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 24px)}
+h1{font-size:28px;margin:0 0 16px}
+.card{background:#1c1c1e;border-radius:14px;padding:14px;margin-bottom:14px}
+label{display:block;font-size:13px;color:#8e8e93;margin:10px 0 6px}
+label:first-child{margin-top:0}
+textarea,select,input{width:100%;font-size:16px;background:#2c2c2e;color:#fff;border:0;border-radius:10px;padding:12px;-webkit-appearance:none;appearance:none}
+textarea{min-height:110px;resize:vertical}
+.row{display:flex;gap:10px}.row>div{flex:1}
+button{width:100%;font-size:17px;font-weight:600;border:0;border-radius:12px;padding:15px;background:#0a84ff;color:#fff}
+button:disabled{opacity:.5}
+.sec{background:#2c2c2e;margin-top:10px}
+#status{font-size:14px;color:#8e8e93;margin-top:10px;white-space:pre-wrap;word-break:break-word}
+video{width:100%;border-radius:12px;background:#111;margin-top:10px;max-height:70vh}
+a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;padding:14px;border-radius:12px;background:#30d158;color:#000;margin-top:10px}
+.hint{font-size:12px;color:#8e8e93;margin-top:6px}
+.hidden{display:none}
+</style></head><body>
+<h1>Video IA</h1>
+<div class="card">
+  <label for="model">Modelo de IA</label>
+  <select id="model"></select>
+  <div class="hint" id="modelInfo"></div>
+  <label for="key">API key del proveedor</label>
+  <input id="key" type="password" autocomplete="off" placeholder="Pegá tu clave">
+  <div class="hint">Se guarda solo en este dispositivo (localStorage), una por proveedor.</div>
+  <div id="proxyBox" class="hidden">
+    <label for="proxy">URL de proxy (obligatorio para Replicate)</label>
+    <input id="proxy" type="url" placeholder="https://mi-proxy.workers.dev">
+    <div class="hint">Replicate no permite llamadas desde el navegador (CORS). El proxy debe reenviar /v1/... a https://api.replicate.com/v1/... con tus encabezados.</div>
+  </div>
+</div>
+<div class="card">
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" placeholder="Describí el video…"></textarea>
+  <div class="row">
+    <div><label for="ar">Formato</label><select id="ar"></select></div>
+    <div id="durBox"><label for="dur">Duración</label><select id="dur"></select></div>
+    <div id="resBox"><label for="res">Resolución</label><select id="res"></select></div>
+  </div>
+</div>
+<button id="go">Generar video</button>
+<button id="cancel" class="sec hidden">Cancelar</button>
+<div id="status"></div>
+<div id="out" class="hidden">
+  <video id="vid" controls playsinline loop></video>
+  <a id="dl" class="btn" download="video.mp4" target="_blank" rel="noopener">Descargar video</a>
+</div>
+<script>
+// Proveedores con endpoints documentados. xAI y fal.ai permiten CORS desde el navegador.
+const MODELS = [
+ {id:"xai", provider:"xai", name:"Grok Imagine Video (xAI)", model:"grok-imagine-video",
+  ar:["9:16","16:9","1:1","4:3","3:4","3:2","2:3"], dur:[5,6,8,10,12,15], res:["480p","720p"],
+  info:"api.x.ai · Bearer · funciona directo desde el navegador"},
+ {id:"fal-wan22", provider:"fal", name:"Wan 2.2 A14B (fal.ai)", endpoint:"fal-ai/wan/v2.2-a14b/text-to-video",
+  ar:["9:16","16:9","1:1"], res:["480p","580p","720p"],
+  build:(p,o)=>({prompt:p,aspect_ratio:o.ar,resolution:o.res}),
+  info:"fal.ai queue · funciona directo desde el navegador"},
+ {id:"fal-kling", provider:"fal", name:"Kling 2.1 Master (fal.ai)", endpoint:"fal-ai/kling-video/v2.1/master/text-to-video",
+  ar:["9:16","16:9","1:1"], dur:[5,10],
+  build:(p,o)=>({prompt:p,aspect_ratio:o.ar,duration:String(o.dur)}),
+  info:"fal.ai queue · funciona directo desde el navegador"},
+ {id:"fal-hunyuan", provider:"fal", name:"Hunyuan Video (fal.ai)", endpoint:"fal-ai/hunyuan-video",
+  ar:["9:16","16:9"], res:["480p","580p","720p"],
+  build:(p,o)=>({prompt:p,aspect_ratio:o.ar,resolution:o.res}),
+  info:"fal.ai queue · funciona directo desde el navegador"},
+ {id:"rep-wan", provider:"replicate", name:"Wan 2.2 T2V fast (Replicate)", owner:"wan-video/wan-2.2-t2v-fast",
+  ar:["9:16","16:9"], res:["480p","720p"],
+  build:(p,o)=>({prompt:p,aspect_ratio:o.ar,resolution:o.res}),
+  info:"Replicate · necesita proxy (sin CORS)"},
+];
+const $=id=>document.getElementById(id);
+let abort=null;
+const fill=(el,arr,fmt=x=>x,def)=>{el.innerHTML=arr.map(v=>`<option value="${v}">${fmt(v)}</option>`).join("");if(def&&arr.map(String).includes(String(def)))el.value=def;};
+fill($("model"),MODELS.map(m=>m.id),id=>MODELS.find(m=>m.id===id).name);
+$("model").value=localStorage.getItem("vi_model")||"xai";
+const cur=()=>MODELS.find(m=>m.id===$("model").value)||MODELS[0];
+function refresh(){
+  const m=cur(); localStorage.setItem("vi_model",m.id);
+  $("modelInfo").textContent=m.info;
+  $("key").value=localStorage.getItem("vi_key_"+m.provider)||"";
+  fill($("ar"),m.ar,x=>x,"9:16");
+  $("durBox").classList.toggle("hidden",!m.dur); if(m.dur) fill($("dur"),m.dur,x=>x+" s",m.dur[0]);
+  $("resBox").classList.toggle("hidden",!m.res); if(m.res) fill($("res"),m.res,x=>x,m.res[0]);
+  $("proxyBox").classList.toggle("hidden",m.provider!=="replicate");
+  $("proxy").value=localStorage.getItem("vi_proxy")||"";
+}
+$("model").onchange=refresh;
+$("key").oninput=()=>localStorage.setItem("vi_key_"+cur().provider,$("key").value.trim());
+$("proxy").oninput=()=>localStorage.setItem("vi_proxy",$("proxy").value.trim());
+$("prompt").value=localStorage.getItem("vi_prompt")||"";
+$("prompt").oninput=()=>localStorage.setItem("vi_prompt",$("prompt").value);
+refresh();
+
+const say=t=>$("status").textContent=t;
+const sleep=(ms,sig)=>new Promise((r,j)=>{const t=setTimeout(r,ms);sig.addEventListener("abort",()=>{clearTimeout(t);j(new Error("Cancelado"))},{once:true})});
+async function j(url,opt,sig){const r=await fetch(url,{...opt,signal:sig});const t=await r.text();let d;try{d=JSON.parse(t)}catch{d={raw:t}}
+  if(!r.ok)throw new Error(`HTTP ${r.status}: ${d.error?.message||d.error||d.detail||d.message||t}`.slice(0,400));return d;}
+
+// xAI: POST /v1/videos/generations -> request_id ; GET /v1/videos/{id} hasta status "done"
+async function runXai(m,key,p,o,sig){
+  const H={"Content-Type":"application/json","Authorization":"Bearer "+key};
+  const s=await j("https://api.x.ai/v1/videos/generations",{method:"POST",headers:H,
+    body:JSON.stringify({model:m.model,prompt:p,aspect_ratio:o.ar,duration:Number(o.dur),resolution:o.res})},sig);
+  const id=s.request_id; if(!id) throw new Error("Sin request_id: "+JSON.stringify(s));
+  for(let i=0;;i++){ await sleep(5000,sig);
+    const r=await j("https://api.x.ai/v1/videos/"+id,{headers:{"Authorization":"Bearer "+key}},sig);
+    say(`xAI: ${r.status||"procesando"}… (${(i+1)*5}s)`);
+    if(r.status==="done") return r.video?.url;
+    if(r.status==="failed"||r.status==="expired") throw new Error("Falló: "+JSON.stringify(r).slice(0,300));
+  }
+}
+// fal.ai: POST queue.fal.run/{endpoint} ; GET status_url hasta COMPLETED ; GET response_url
+async function runFal(m,key,p,o,sig){
+  const H={"Content-Type":"application/json","Authorization":"Key "+key};
+  const s=await j("https://queue.fal.run/"+m.endpoint,{method:"POST",headers:H,body:JSON.stringify(m.build(p,o))},sig);
+  for(let i=0;;i++){ await sleep(4000,sig);
+    const st=await j(s.status_url,{headers:H},sig);
+    say(`fal.ai: ${st.status}${st.queue_position!=null?" (posición "+st.queue_position+")":""}… ${(i+1)*4}s`);
+    if(st.status==="COMPLETED"){ if(st.error) throw new Error(st.error);
+      const r=await j(s.response_url,{headers:H},sig); return r.video?.url; }
+  }
+}
+// Replicate (vía proxy): POST /v1/models/{owner}/{name}/predictions ; GET /v1/predictions/{id}
+async function runReplicate(m,key,p,o,sig){
+  const base=($("proxy").value.trim()||"").replace(/\/$/,""); if(!base) throw new Error("Replicate necesita una URL de proxy.");
+  const H={"Content-Type":"application/json","Authorization":"Bearer "+key};
+  let r=await j(`${base}/v1/models/${m.owner}/predictions`,{method:"POST",headers:H,body:JSON.stringify({input:m.build(p,o)})},sig);
+  for(let i=0;!["succeeded","failed","canceled"].includes(r.status);i++){ await sleep(4000,sig);
+    r=await j(`${base}/v1/predictions/${r.id}`,{headers:H},sig); say(`Replicate: ${r.status}… ${(i+1)*4}s`); }
+  if(r.status!=="succeeded") throw new Error("Falló: "+(r.error||r.status));
+  return Array.isArray(r.output)?r.output[0]:r.output;
+}
+
+$("go").onclick=async()=>{
+  const m=cur(), key=$("key").value.trim(), p=$("prompt").value.trim();
+  if(!key) return say("Falta la API key."); if(!p) return say("Escribí un prompt.");
+  const o={ar:$("ar").value,dur:m.dur?$("dur").value:undefined,res:m.res?$("res").value:undefined};
+  abort=new AbortController(); $("go").disabled=true; $("cancel").classList.remove("hidden"); $("out").classList.add("hidden");
+  say("Enviando a "+m.name+"…");
+  try{
+    const url=await ({xai:runXai,fal:runFal,replicate:runReplicate})[m.provider](m,key,p,o,abort.signal);
+    if(!url) throw new Error("La respuesta no trajo URL de video.");
+    $("vid").src=url; $("dl").href=url; $("out").classList.remove("hidden");
+    say("¡Listo! En iPhone: abrí el video y usá Compartir → Guardar video.");
+  }catch(e){ say((e.name==="TypeError"?"Error de red/CORS: ":"")+e.message); }
+  finally{ $("go").disabled=false; $("cancel").classList.add("hidden"); abort=null; }
+};
+$("cancel").onclick=()=>abort&&abort.abort();
+</script></body></html>
